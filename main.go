@@ -57,7 +57,7 @@ func messageHandler(evt interface{}) {
 	case *events.Message:
 		senderJID := v.Info.Sender.ToNonAD().String()
 
-    isNotEdit = ((v.Info.Edit == "" && v.Info.MsgBotInfo.EditType == "") || v.Info.MsgBotInfo.EditType == "last")
+    isNotEdit := ((v.Info.Edit == "" && v.Info.MsgBotInfo.EditType == "") || v.Info.MsgBotInfo.EditType == "last")
 		if isNotEdit  && isTarget(senderJID) {
 			msgID := v.Info.ID
 			title := v.Info.PushName
@@ -100,8 +100,10 @@ func messageHandler(evt interface{}) {
 		}
 
 	case *events.Receipt:
+    // fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
+    senderJID := v.MessageSender.User + "@" + v.MessageSender.Server
 		// Only care about "Read" receipts
-		if v.Type == types.ReceiptTypeRead {
+		if isTarget(senderJID) && v.Type == types.ReceiptTypeRead {
 			pendingMutex.Lock()
 			for _, id := range v.MessageIDs {
         fmt.Println("Got a read receipt for message with id:", id)
@@ -114,7 +116,11 @@ func messageHandler(evt interface{}) {
 				}
 			}
 			pendingMutex.Unlock()
-		}
+		} else {
+      for _, id := range v.MessageIDs {
+        fmt.Printf("Ignoring read receipt for message with id: %s from %s\n", id, senderJID)
+      }
+    }
 	}
 }
 
