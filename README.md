@@ -33,7 +33,12 @@ Ensure you have the following installed on your Linux system:
     cd whatsapp-notification
     ```
 
-2.  **Run the Build Script**:
+2.  **Init the Go project**:
+    ```bash
+    go mod init whatsapp-notification
+    ```
+
+3.  **Run the Build Script**:
     This script handles module initialization, dependency downloads, and compilation.
     ```bash
     chmod +x build.sh
