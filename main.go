@@ -1,17 +1,20 @@
 package main
 
 import (
-  "os"
 	"context"
-  "flag"
+	"flag"
 	"fmt"
+	"os"
 	"os/exec"
-  "strings"
+	"strings"
+	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
 
@@ -22,70 +25,125 @@ func (i *targetFlags) String() string {
 }
 
 func (i *targetFlags) Set(value string) error {
-	// Allows comma-separated lists OR repeating the flag
 	for _, item := range strings.Split(value, ",") {
-    trimmedItem := strings.TrimSpace(item)
-    fmt.Println("Using target: ", trimmedItem)
+		trimmedItem := strings.TrimSpace(item)
+		fmt.Println("Using target: ", trimmedItem)
 		*i = append(*i, trimmedItem)
 	}
 	return nil
 }
 
-var targets targetFlags
+var (
+	targets              targetFlags
+	pendingNotifications = make(map[string]chan bool)
+	pendingMutex         sync.Mutex
+)
 
 func notify(title, body, senderJID string) {
-  exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", title, body).Run()
-  fmt.Printf("Got message from: %s, body: %s\n", senderJID, body)
+	exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", title, body).Run()
+}
+
+func isTarget(senderJID string) bool {
+	for _, t := range targets {
+		if senderJID == t {
+			return true
+		}
+	}
+	return false
 }
 
 func messageHandler(evt interface{}) {
-	if v, ok := evt.(*events.Message); ok {
+	switch v := evt.(type) {
+	case *events.Message:
 		senderJID := v.Info.Sender.ToNonAD().String()
-    isTargetJID := false
-    for _, t := range targets {
-      if senderJID == t {
-        isTargetJID = true
-        break
-      }
-    }
 
-		if isTargetJID {
-      title := v.Info.PushName
+    isNotEdit = ((v.Info.Edit == "" && v.Info.MsgBotInfo.EditType == "") || v.Info.MsgBotInfo.EditType == "last")
+		if isNotEdit  && isTarget(senderJID) {
+			msgID := v.Info.ID
+			title := v.Info.PushName
 			body := v.Message.GetConversation()
-      notify(title, body, senderJID)
-    } else {
-      fmt.Printf("Ignoring message from JID: %s\n", senderJID)
-    }
+			if body == "" {
+				body = "[Media/Non-text Message]"
+			}
+
+      // DEBUG: Statement
+      // fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
+      fmt.Printf("Got message from: %s, id: %s, body: %s\n", senderJID, msgID, body)
+			// Create a cancellation channel for this specific message
+			stopChan := make(chan bool, 1)
+			pendingMutex.Lock()
+			pendingNotifications[msgID] = stopChan
+			pendingMutex.Unlock()
+
+			// Start the grace period timer
+			go func(id, t, b, jid string, stop chan bool) {
+				timer := time.NewTimer(4 * time.Second)
+				defer timer.Stop()
+
+				select {
+				case <-timer.C:
+					// 2 seconds passed without a "Read" receipt
+          fmt.Printf("No read receipt received. Notifying on message [id:%s] from %s\n", id, jid)
+					notify(t, b, jid)
+				case <-stop:
+					// "Read" receipt arrived within 2 seconds
+					fmt.Printf("Notification [id:%s] suppressed for %s (Message read on another device)\n", id, jid)
+				}
+
+				pendingMutex.Lock()
+				delete(pendingNotifications, id)
+				pendingMutex.Unlock()
+			}(msgID, title, body, senderJID, stopChan)
+
+		} else {
+			fmt.Printf("Ignoring message from JID: %s\n", senderJID)
+		}
+
+	case *events.Receipt:
+		// Only care about "Read" receipts
+		if v.Type == types.ReceiptTypeRead {
+			pendingMutex.Lock()
+			for _, id := range v.MessageIDs {
+        fmt.Println("Got a read receipt for message with id:", id)
+				if stop, ok := pendingNotifications[id]; ok {
+					// Signal the goroutine to stop/cancel the notification
+					select {
+					case stop <- true:
+					default:
+					}
+				}
+			}
+			pendingMutex.Unlock()
+		}
 	}
 }
 
 func connect(client *whatsmeow.Client, ctx context.Context) {
 	if client.Store.ID != nil {
-    err := client.Connect()
-    if err != nil {
-      panic(err)
-    }
-    return
-  } 
-  // No saved session? Get the QR channel
-  qrChan, _ := client.GetQRChannel(ctx)
-  err := client.Connect()
-  if err != nil {
-    panic(err)
-  }
-  for evt := range qrChan {
-    if evt.Event == "code" {
-      // This prints the QR code to your terminal
-      fmt.Println("Scan this QR code with WhatsApp:")
-      qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-    } else {
-      fmt.Println("Login event:", evt.Event)
-    }
-  }
+		err := client.Connect()
+		if err != nil {
+			panic(err)
+		}
+		return
+	}
+
+	qrChan, _ := client.GetQRChannel(ctx)
+	err := client.Connect()
+	if err != nil {
+		panic(err)
+	}
+
+	for evt := range qrChan {
+		if evt.Event == "code" {
+			fmt.Println("Scan this QR code with WhatsApp:")
+			qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+		} else {
+			fmt.Println("Login event:", evt.Event)
+		}
+	}
 }
 
 func main() {
-  // Register the flag list.
 	flag.Var(&targets, "target", "JID of VIP(s). Can be comma-separated or repeated.")
 	flag.Parse()
 
@@ -93,29 +151,26 @@ func main() {
 		fmt.Println("Error: Provide at least one target JID via -target.")
 		os.Exit(1)
 	}
-  
-  // 1. Create a background context for the initialization
+
 	ctx := context.Background()
 
-	// 2. Setup DB (Updated arguments: ctx, dialect, address, logger)
+	// Using the original DB name from your context
+	// Added 'ctx' as the first argument as required by the library version
 	container, err := sqlstore.New(ctx, "sqlite3", "file:whatsapp-notification.db?_foreign_keys=on", nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// 3. Get Device (Updated argument: ctx)
+	// Added 'ctx' as an argument as required by the library version
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		panic(err)
 	}
 
-  // 4. Connect device
 	client := whatsmeow.NewClient(deviceStore, nil)
-  connect(client, ctx)
+	connect(client, ctx)
 
-	// 5. The Event Handler
 	client.AddEventHandler(messageHandler)
 
-  // 6. Wait for program to be killed (Ctrl+C)
 	select {}
 }
