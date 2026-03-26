@@ -1,0 +1,5 @@
+bin/*
+go.mod
+go.sum
+whatsapp-notification.db
+bin/whatsapp-notification.db
