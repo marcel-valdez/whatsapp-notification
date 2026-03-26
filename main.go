@@ -35,7 +35,7 @@ var targets targetFlags
 
 func notify(title, body, senderJID string) {
   exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", title, body).Run()
-  fmt.Println("Got message from: %s, body: %s", senderJID, body)
+  fmt.Printf("Got message from: %s, body: %s\n", senderJID, body)
 }
 
 func messageHandler(evt interface{}) {
