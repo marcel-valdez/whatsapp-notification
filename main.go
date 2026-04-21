@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,8 @@ var (
 )
 
 func notify(title, body, senderJID string) {
-	exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", title, body).Run()
+	timeout := 1000 * 60 * 60 * 12 // 12 hours
+	exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", "--expire-time", strconv.Itoa(timeout), title, body).Run()
 }
 
 func isTarget(senderJID string) bool {
@@ -57,8 +59,8 @@ func messageHandler(evt interface{}) {
 	case *events.Message:
 		senderJID := v.Info.Sender.ToNonAD().String()
 
-    isNotEdit := ((v.Info.Edit == "" && v.Info.MsgBotInfo.EditType == "") || v.Info.MsgBotInfo.EditType == "last")
-		if isNotEdit  && isTarget(senderJID) {
+		isNotEdit := ((v.Info.Edit == "" && v.Info.MsgBotInfo.EditType == "") || v.Info.MsgBotInfo.EditType == "last")
+		if isNotEdit && isTarget(senderJID) {
 			msgID := v.Info.ID
 			title := v.Info.PushName
 			body := v.Message.GetConversation()
@@ -66,9 +68,9 @@ func messageHandler(evt interface{}) {
 				body = "[Media/Non-text Message]"
 			}
 
-      // DEBUG: Statement
-      // fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
-      fmt.Printf("Got message from: %s, id: %s, body: %s\n", senderJID, msgID, body)
+			// DEBUG: Statement
+			// fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
+			fmt.Printf("Got message from: %s, id: %s, body: %s\n", senderJID, msgID, body)
 			// Create a cancellation channel for this specific message
 			stopChan := make(chan bool, 1)
 			pendingMutex.Lock()
@@ -83,7 +85,7 @@ func messageHandler(evt interface{}) {
 				select {
 				case <-timer.C:
 					// 2 seconds passed without a "Read" receipt
-          fmt.Printf("No read receipt received. Notifying on message [id:%s] from %s\n", id, jid)
+					fmt.Printf("No read receipt received. Notifying on message [id:%s] from %s\n", id, jid)
 					notify(t, b, jid)
 				case <-stop:
 					// "Read" receipt arrived within 2 seconds
@@ -100,13 +102,13 @@ func messageHandler(evt interface{}) {
 		}
 
 	case *events.Receipt:
-    // fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
-    senderJID := v.MessageSender.User + "@" + v.MessageSender.Server
+		// fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
+		senderJID := v.MessageSender.User + "@" + v.MessageSender.Server
 		// Only care about "Read" receipts
 		if isTarget(senderJID) && v.Type == types.ReceiptTypeRead {
 			pendingMutex.Lock()
 			for _, id := range v.MessageIDs {
-        fmt.Println("Got a read receipt for message with id:", id)
+				fmt.Println("Got a read receipt for message with id:", id)
 				if stop, ok := pendingNotifications[id]; ok {
 					// Signal the goroutine to stop/cancel the notification
 					select {
@@ -117,10 +119,10 @@ func messageHandler(evt interface{}) {
 			}
 			pendingMutex.Unlock()
 		} else {
-      for _, id := range v.MessageIDs {
-        fmt.Printf("Ignoring read receipt for message with id: %s from %s\n", id, senderJID)
-      }
-    }
+			for _, id := range v.MessageIDs {
+				fmt.Printf("Ignoring read receipt for message with id: %s from %s\n", id, senderJID)
+			}
+		}
 	}
 }
 
