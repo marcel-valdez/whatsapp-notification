@@ -1,3 +1,9 @@
+// Package main provides a background daemon that monitors WhatsApp messages
+// for specific target JIDs and triggers system notifications or custom commands.
+//
+// It includes a "grace period" logic where it waits a few seconds before notifying
+// to see if a read receipt is received from another device, preventing redundant
+// notifications for messages already seen on a phone or web client.
 package main
 
 import (
@@ -19,6 +25,8 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
+// targetFlags is a custom flag type to handle multiple target JIDs
+// passed via the command line (e.g., -target jid1 -target jid2 or -target jid1,jid2).
 type targetFlags []string
 
 func (i *targetFlags) String() string {
@@ -35,16 +43,36 @@ func (i *targetFlags) Set(value string) error {
 }
 
 var (
-	targets              targetFlags
+	targets          targetFlags
+	notificationExec string
+	// pendingNotifications tracks messages currently in their grace period.
+	// The key is the WhatsApp Message ID, and the value is a channel used to cancel the notification.
 	pendingNotifications = make(map[string]chan bool)
 	pendingMutex         sync.Mutex
 )
 
+// notify triggers the actual alert. It prioritizes the custom -exec command
+// if provided; otherwise, it falls back to the Linux native notify-send.
 func notify(title, body, senderJID string) {
-	timeout := 1000 * 60 * 60 * 12 // 12 hours
-	exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", "--expire-time", strconv.Itoa(timeout), title, body).Run()
+	if notificationExec != "" {
+		fmt.Printf("Executing custom notification: %s '%s' '%s'\n", notificationExec, title, body)
+		err := exec.Command(notificationExec, title, body).Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error executing custom notification command: %v\n", err)
+		}
+		return
+	}
+
+	// Default behavior: use notify-send (Linux)
+	// Timeout is set to 12 hours so critical messages persist on the desktop.
+	timeout := 1000 * 60 * 60 * 12
+	err := exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", "--expire-time", strconv.Itoa(timeout), title, body).Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error executing notify-send: %v\n", err)
+	}
 }
 
+// isTarget checks if the provided sender JID matches any of the user-defined targets.
 func isTarget(senderJID string) bool {
 	for _, t := range targets {
 		if senderJID == t {
@@ -54,15 +82,21 @@ func isTarget(senderJID string) bool {
 	return false
 }
 
+// messageHandler processes incoming events from the whatsmeow client.
 func messageHandler(evt interface{}) {
 	switch v := evt.(type) {
 	case *events.Message:
 		senderJID := v.Info.Sender.ToNonAD().String()
 
+		// Filter for "real" messages: exclude edits unless they are the final version,
+		// and verify the sender is in our VIP target list.
 		isNotEdit := ((v.Info.Edit == "" && v.Info.MsgBotInfo.EditType == "") || v.Info.MsgBotInfo.EditType == "last")
 		if isNotEdit && isTarget(senderJID) {
 			msgID := v.Info.ID
 			title := v.Info.PushName
+			if title == "" {
+				title = senderJID
+			}
 			body := v.Message.GetConversation()
 			if body == "" {
 				body = "[Media/Non-text Message]"
@@ -71,24 +105,26 @@ func messageHandler(evt interface{}) {
 			// DEBUG: Statement
 			// fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
 			fmt.Printf("Got message from: %s, id: %s, body: %s\n", senderJID, msgID, body)
-			// Create a cancellation channel for this specific message
+
+			// Create a cancellation channel for the grace-period timer.
 			stopChan := make(chan bool, 1)
 			pendingMutex.Lock()
 			pendingNotifications[msgID] = stopChan
 			pendingMutex.Unlock()
 
-			// Start the grace period timer
+			// GRACE PERIOD LOGIC:
+			// Start a goroutine that waits 4 seconds before triggering the notification.
+			// If a "Read" receipt arrives for this message ID within those 4 seconds,
+			// the stopChan will be signaled and the notification will be suppressed.
 			go func(id, t, b, jid string, stop chan bool) {
 				timer := time.NewTimer(4 * time.Second)
 				defer timer.Stop()
 
 				select {
 				case <-timer.C:
-					// 2 seconds passed without a "Read" receipt
 					fmt.Printf("No read receipt received. Notifying on message [id:%s] from %s\n", id, jid)
 					notify(t, b, jid)
 				case <-stop:
-					// "Read" receipt arrived within 2 seconds
 					fmt.Printf("Notification [id:%s] suppressed for %s (Message read on another device)\n", id, jid)
 				}
 
@@ -103,6 +139,7 @@ func messageHandler(evt interface{}) {
 
 	case *events.Receipt:
 		// fmt.Printf("\n--- DEBUG INFO ---\n%+v\n------------------\n", v)
+		// Handle read receipts to cancel pending notifications.
 		senderJID := v.MessageSender.User + "@" + v.MessageSender.Server
 		// Only care about "Read" receipts
 		if isTarget(senderJID) && v.Type == types.ReceiptTypeRead {
@@ -110,7 +147,7 @@ func messageHandler(evt interface{}) {
 			for _, id := range v.MessageIDs {
 				fmt.Println("Got a read receipt for message with id:", id)
 				if stop, ok := pendingNotifications[id]; ok {
-					// Signal the goroutine to stop/cancel the notification
+					// Signal the goroutine to cancel the pending notification.
 					select {
 					case stop <- true:
 					default:
@@ -118,16 +155,14 @@ func messageHandler(evt interface{}) {
 				}
 			}
 			pendingMutex.Unlock()
-		} else {
-			for _, id := range v.MessageIDs {
-				fmt.Printf("Ignoring read receipt for message with id: %s from %s\n", id, senderJID)
-			}
 		}
 	}
 }
 
+// connect manages the initial connection and authentication (QR code) flow.
 func connect(client *whatsmeow.Client, ctx context.Context) {
 	if client.Store.ID != nil {
+		// Existing session found in SQLite.
 		err := client.Connect()
 		if err != nil {
 			panic(err)
@@ -135,6 +170,7 @@ func connect(client *whatsmeow.Client, ctx context.Context) {
 		return
 	}
 
+	// No session: Generate QR code for terminal scanning.
 	qrChan, _ := client.GetQRChannel(ctx)
 	err := client.Connect()
 	if err != nil {
@@ -153,6 +189,7 @@ func connect(client *whatsmeow.Client, ctx context.Context) {
 
 func main() {
 	flag.Var(&targets, "target", "JID of VIP(s). Can be comma-separated or repeated.")
+	flag.StringVar(&notificationExec, "exec", "", "Custom command/script to execute for notifications. Called with 'title' and 'body' as args.")
 	flag.Parse()
 
 	if len(targets) == 0 {
@@ -162,14 +199,12 @@ func main() {
 
 	ctx := context.Background()
 
-	// Using the original DB name from your context
-	// Added 'ctx' as the first argument as required by the library version
+	// Initialize the local SQLite store for persistent sessions.
 	container, err := sqlstore.New(ctx, "sqlite3", "file:whatsapp-notification.db?_foreign_keys=on", nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// Added 'ctx' as an argument as required by the library version
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		panic(err)
@@ -180,5 +215,6 @@ func main() {
 
 	client.AddEventHandler(messageHandler)
 
+	// Keep the application running.
 	select {}
 }

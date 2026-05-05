@@ -10,6 +10,7 @@ A lightweight, background **Go** daemon for **Linux** that triggers system notif
 * **Targeted Notifications**: Filter incoming messages for a specific **VIP contact**.
 * **Lightweight**: Consumes significantly less RAM than Electron apps.
 * **Linux Native**: Uses `notify-send` for desktop integration.
+* **Custom Commands**: Allows executing a custom script when a message arrives.
 * **Persistent Session**: Authenticate once; session keys are stored in a local SQLite database.
 
 ---
@@ -69,6 +70,14 @@ Copy that ID and restart the script with it as the `-target`.
 
 Note that you may specify multiple comma-separated JIDs.
 
+### 3. Custom Notification Script
+
+You can specify a custom script or command to execute when a message arrives by using the `-exec` flag. The script will receive the message title and body as its first and second arguments, respectively.
+
+```bash
+./bin/whatsapp-notification -target 1234567890@s.whatsapp.net -exec /path/to/script.sh
+```
+
 ---
 
 ## Running as a Background Daemon
@@ -82,7 +91,8 @@ Description=WhatsApp Notifier
 [Service]
 # You will need the SQLite DB to be under the working directory.
 WorkingDirectory=/home/<username>/.config/whatsapp-notification/
-ExecStart=/home/<username>/bin/whatsapp-notification -target 1234567890@s.whatsapp.net
+# Optional: Add -exec /path/to/script.sh to run a custom script
+ExecStart=/home/<username>/bin/whatsapp-notification -target 1234567890@s.whatsapp.net -exec /path/to/script.sh
 Restart=always
 
 [Install]
