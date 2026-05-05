@@ -66,7 +66,7 @@ func notify(title, body, senderJID string) {
 	// Default behavior: use notify-send (Linux)
 	// Timeout is set to 12 hours so critical messages persist on the desktop.
 	timeout := 1000 * 60 * 60 * 12
-	err := exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "critical", "--icon", "user-available", "--expire-time", strconv.Itoa(timeout), title, body).Run()
+	err := exec.Command("/usr/bin/notify-send", "--app-name", "WhatsApp", "--urgency", "normal", "--icon", "user-available", "--expire-time", strconv.Itoa(timeout), title, body).Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error executing notify-send: %v\n", err)
 	}
