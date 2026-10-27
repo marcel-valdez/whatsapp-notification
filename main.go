@@ -155,6 +155,10 @@ func messageHandler(evt interface{}) {
 				}
 			}
 			pendingMutex.Unlock()
+		} else {
+			for _, id := range v.MessageIDs {
+				fmt.Printf("Ignoring read receipt for message with id: %s from %s\n", id, senderJID)
+			}
 		}
 	}
 }
